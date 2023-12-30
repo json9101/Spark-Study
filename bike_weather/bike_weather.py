@@ -1,14 +1,19 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode,col,split,concat,substring,when,isnull,count
+from pyspark.sql.functions import explode,col,split,concat,substring,when,isnull,count,abs
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.evaluation import RegressionEvaluator
 
 
-spark = SparkSession.builder.appName('bike_weatheer').getOrCreate()
+spark = SparkSession.builder.appName('bike_weather').config("spark.jars.packages", "com.microsoft.azure:synapseml_2.12:1.0.2") \
+            .config("spark.jars.repositories", "https://mmlspark.azureedge.net/maven") \
+            .getOrCreate()
+from synapse.ml.lightgbm import *
 
 weather=spark.read.option('multiline','true').json('/home/jss/app/spark/data/json_cycle_finale.json')
-#bike = spark.read.option('multiline','true').json('/home/jss/app/spark/data/bike.json')
+# bike = spark.read.option('multiline','true').json('/home/jss/app/spark/data/bike.json')
+
+# bike.show(10)
 
 exploded_df = weather.select(explode("response.body.items.item").alias("item"))
 
@@ -124,7 +129,7 @@ selected_final_df.printSchema()
 
 
 assembler = VectorAssembler(
-    inputCols=['maxTa', 'sumRnDur', 'sumRn', 'maxInsWs', 'maxInsWsWd', 'maxWs', 'maxWsWd', 'avgWs', 'maxWd', 'avgTd', 'avgRhm', 'avgPv', 'ssDur', 'avgTca', 'avgLmac', 'avgTs', 'avgM50Te', 'Year', 'Month', 'sumFogDur', 'minTg', 'avg_rhm_hour', 'avg_rhm_minute', 'min_ps_hour', 'min_ps_minute', 'hr24SumRws', 'max_ws_hour', 'max_ws_minute', 'ddMefs', 'max_ta_hour', 'max_ta_minute', 'min_ta_hour', 'min_ta_minute'],
+    inputCols=['maxTa', 'sumRnDur', 'sumRn', 'maxInsWs', 'maxInsWsWd', 'maxWs', 'maxWsWd', 'avgWs', 'maxWd', 'avgTd', 'avgRhm', 'avgPv', 'ssDur', 'avgTca', 'avgLmac', 'avgTs', 'Year', 'Month', 'sumFogDur', 'minTg', 'avg_rhm_hour', 'avg_rhm_minute', 'min_ps_hour', 'min_ps_minute', 'hr24SumRws', 'max_ws_hour', 'max_ws_minute', 'ddMefs', 'max_ta_hour', 'max_ta_minute', 'min_ta_hour', 'min_ta_minute'],
     outputCol="features",
     handleInvalid="skip"  # Change this to "keep" if you want to keep nulls in the dataset
 )
@@ -141,14 +146,50 @@ model = rf.fit(trainingData)
 predictions = model.transform(testData)  # Use your test data here
 
 # Evaluate the model
-evaluator = RegressionEvaluator(
+rmse_ran_evaluator = RegressionEvaluator(
     labelCol="avgTa", predictionCol="prediction", metricName="rmse"
+)
+r2_ran_evaluator = RegressionEvaluator(
+    labelCol="avgTa", predictionCol="prediction", metricName="r2"
 )
 
 # Calculate RMSE
-rmse = evaluator.evaluate(predictions)
-print("Root Mean Squared Error (RMSE) on test data =", rmse)
+ran_rmse = rmse_ran_evaluator.evaluate(predictions)
+print("Root Mean Squared Error (RMSE) on test data =", ran_rmse)
+ran_r2 = r2_ran_evaluator.evaluate(predictions)
+print(f"R^2 Score: {ran_r2}")
+ran_absolute_errors = predictions.withColumn("absolute_error", abs(col("prediction") - col("avgTa")))
+ran_mae = ran_absolute_errors.selectExpr("avg(absolute_error)").collect()[0][0]
+print("Mean Absolute Error (MAE):", ran_mae)
 
-#'avgTa','maxTa','sumRnDur','sumRn','maxInsWs','maxInsWsWd','maxWs','maxWsWd','avgWs','maxWd','avgTd','avgRhm','avgPv','ssDur','avgTca','avgLmac','avgTs','avgM50Te','Year','Month,sumFogDur,minTg,avg_rhm_hour,avg_rhm_minute,min_ps_hour,min_ps_minute,	hr24SumRws,max_ws_hour,max_ws_minute,ddmefs,max_ta_hour,max_ta_minute,min_ta_hour,min_ta_minute,ddmefs_hour,ddmefs_minute'
+
+
+lgbm_df = (LightGBMRegressor(featuresCol="features", labelCol="avgTa")
+    # .setApplication('quantile')
+    # .setAlpha(0.3)
+    # .setLearningRate(0.3)
+    # .setNumIterations(100)
+    # .setNumLeaves(31)
+    .fit(trainingData)
+    .transform(testData))
+
+# Evaluate the model
+rmse_lgbm_evaluator = RegressionEvaluator(
+    labelCol="avgTa", predictionCol="prediction", metricName="rmse"
+)
+r2_lgbm_evaluator = RegressionEvaluator(
+    labelCol="avgTa", predictionCol="prediction", metricName="r2"
+)
+
+# Calculate RMSE
+lgbm_rmse = rmse_lgbm_evaluator.evaluate(lgbm_df)
+print("Root Mean Squared Error (RMSE) on test data =", lgbm_rmse)
+lgbm_r2 = r2_lgbm_evaluator.evaluate(lgbm_df)
+print(f"R^2 Score: {lgbm_r2}")
+absolute_errors_lgbm = lgbm_df.withColumn("absolute_error", abs(col("prediction") - col("avgTa")))
+lgbm_mae = absolute_errors_lgbm.selectExpr("avg(absolute_error)").collect()[0][0]
+print("Mean Absolute Error (MAE) for LightGBM:", lgbm_mae)
+spark.stop()
+
 
 
